@@ -1,0 +1,26 @@
+{
+  "_comment_": "Definition of the MongoDB Atlas Vector Search index. Paste this into the Atlas UI when creating an index named 'video_content_index' on the 'videos' collection. We commit this here so the index can be reproduced from scratch in any new Atlas cluster.",
+  "_index_name_": "video_content_index",
+  "_collection_": "videos",
+  "_database_": "mini_tiktok",
+  "fields": [
+    {
+      "type": "vector",
+      "path": "content_embedding",
+      "numDimensions": 384,
+      "similarity": "cosine"
+    },
+    {
+      "type": "filter",
+      "path": "moderation_status"
+    },
+    {
+      "type": "filter",
+      "path": "distribution_stage"
+    },
+    {
+      "type": "filter",
+      "path": "uploaded_at"
+    }
+  ]
+}

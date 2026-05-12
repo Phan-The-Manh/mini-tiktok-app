@@ -1,0 +1,46 @@
+# Mini-TikTok local infrastructure
+# Run with: docker compose up -d
+# Stop with: docker compose down
+# Stop and erase all data: docker compose down -v
+
+services:
+
+  # =========================================================
+  # Redis — used for caching AND as our message queue (Redis Streams)
+  # =========================================================
+  redis:
+    image: redis:7-alpine          # 'alpine' = small, fast Linux base. ~30 MB image
+    container_name: mini-tiktok-redis
+    ports:
+      - "6379:6379"                # host_port:container_port
+    volumes:
+      - ./redis-data:/data         # persists data across restarts
+    command: redis-server --appendonly yes  # AOF persistence (durable writes)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # =========================================================
+  # MinIO — S3-compatible object storage for video files
+  # =========================================================
+  minio:
+    image: minio/minio:latest
+    container_name: mini-tiktok-minio
+    ports:
+      - "9000:9000"                # S3 API (your Python code talks to this)
+      - "9001:9001"                # Web console (browser UI for browsing buckets)
+    environment:
+      MINIO_ROOT_USER: minioadmin       # default username
+      MINIO_ROOT_PASSWORD: minioadmin   # default password — fine for local dev
+    volumes:
+      - ./minio-data:/data         # persists uploaded files across restarts
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
