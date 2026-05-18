@@ -4,7 +4,7 @@ A laptop-friendly, end-to-end video recommendation system inspired by TikTok's F
 
 **Cost target: $0/month.** Every tool in the stack is verified free-forever or runs locally.
 
-> Full architecture, build order, and design decisions live in [`CLAUDE.md`](./CLAUDE.md).
+> Architecture, rules, and component boundaries live in [`CLAUDE.md`](./CLAUDE.md). Live build progress and the current-stage breakdown live in [`TODO.md`](./TODO.md).
 
 ---
 
@@ -32,9 +32,9 @@ A laptop-friendly, end-to-end video recommendation system inspired by TikTok's F
 
 | # | Component | Status |
 |---|---|---|
-| 1 | Database Layer | In progress |
-| 2 | Upload Service | Pending |
-| 3 | Content Analyzer | Pending |
+| 1 | Database Layer | `[DONE]` |
+| 2 | Upload Service | `[DONE]` |
+| 3 | Content Analyzer | **Current focus** |
 | 4 | User Embedding Service | Pending |
 | 5 | Recall Service | Pending |
 | 6 | Feed API | Pending |
@@ -44,6 +44,8 @@ A laptop-friendly, end-to-end video recommendation system inspired by TikTok's F
 | 10 | Ranking Service | Pending |
 | 11 | Re-ranker | Pending |
 | 12 | A/B Testing | Pending |
+
+See [`TODO.md`](./TODO.md) for the Content Analyzer breakdown and per-component "Definition of Done" checklists.
 
 ## Quickstart
 
@@ -58,6 +60,7 @@ docker compose up -d
 python -m venv venv
 venv\Scripts\Activate.ps1            # Windows PowerShell
 pip install -r database/requirements.txt
+pip install -r upload_service/requirements.txt
 
 # 3. Configure MongoDB Atlas
 cp database/.env.example database/.env
@@ -67,9 +70,16 @@ cp database/.env.example database/.env
 python database/scripts/create_indexes.py
 python database/scripts/seed_data.py
 python database/tests/smoke_test.py
+
+# 5. Run the Upload Service (in a second terminal)
+uvicorn upload_service.main:app --reload --port 8001
+# OpenAPI docs:  http://localhost:8001/docs
+# Smoke test:    python -m upload_service.tests.smoke_test
 ```
 
-Detailed setup, including the manual Atlas Vector Search UI step, lives in [`database/README.md`](./database/README.md).
+Per-component setup notes:
+- Database Layer (incl. the manual Atlas Vector Search UI step): [`database/README.md`](./database/README.md)
+- Upload Service (incl. the ffmpeg PATH requirement and passthrough fallback): [`upload_service/README.md`](./upload_service/README.md)
 
 ## Project rules
 
@@ -81,13 +91,21 @@ Detailed setup, including the manual Atlas Vector Search UI step, lives in [`dat
 
 ```
 mini-tiktok-app/
-├── CLAUDE.md                  full architecture + working notes
+├── CLAUDE.md                  rules, architecture, component boundaries
+├── TODO.md                    build progress, current focus, completed stages
 ├── README.md                  this file
 ├── docker-compose.yml         Redis + MinIO
-└── database/                  Component #1 (current focus)
+├── database/                  Component #1 [DONE]
+│   ├── README.md
+│   ├── client.py              shared MongoDB + Redis + MinIO factory
+│   ├── schemas/               Pydantic models (User, Video, Interaction, Experiment)
+│   ├── scripts/               create_indexes, seed_data, vector_index_def
+│   └── tests/                 smoke_test
+└── upload_service/            Component #2 [DONE]
     ├── README.md
-    ├── client.py
-    ├── schemas/
-    ├── scripts/
-    └── tests/
+    ├── main.py                FastAPI app
+    ├── routers/videos.py      POST /videos, GET /videos/{id}, GET /health
+    ├── services/              storage (MinIO), transcoder (ffmpeg), events (Redis Streams)
+    ├── schemas/               api + event Pydantic models
+    └── tests/smoke_test.py
 ```
