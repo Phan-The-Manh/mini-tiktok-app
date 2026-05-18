@@ -5,6 +5,9 @@
 >
 > **Cost target: $0/month. Every tool below is verified free-forever or free-on-laptop.**
 
+> Build progress, current focus, and completed-stage history live in `TODO.md`. This file is the
+> stable reference for project rules, architecture, and component boundaries.
+
 ---
 
 ## SYSTEM RULES
@@ -117,100 +120,23 @@ User swipes/likes/skips
 
 ---
 
-## PART 2: WORKING ORDER (One Component at a Time)
+## PART 2: COMPONENT BOUNDARIES
 
-> The system is intentionally designed with strong boundaries between components so each can be built and tested in isolation. Each component exposes a clear contract (HTTP API, Redis Stream topic, or DB schema) and can be mocked when working on other parts.
-
-### Build Order
-
-| Order | Component | Why This Order | Status |
-|-------|-----------|---------------|--------|
-| 1 | **Database Layer** | Foundation — every other component reads/writes here | **CURRENT FOCUS** |
-| 2 | Upload Service | Need a way to get videos into the system | Pending |
-| 3 | Content Analyzer | Videos must be embedded before they can be recommended | Pending |
-| 4 | User Embedding Service | Needed before Recall can use user vectors | Pending |
-| 5 | Recall Service | First half of the recommendation funnel | Pending |
-| 6 | Feed API (skeleton) | End-to-end "random feed" working before adding ranking | Pending |
-| 7 | Frontend (basic swipe UI) | Need to actually see the feed working | Pending |
-| 8 | Event Service | Capture user actions to drive learning | Pending |
-| 9 | Stream Processors | Close the feedback loop: events to embedding updates | Pending |
-| 10 | Ranking Service (LightGBM) | Upgrade the funnel from "similar" to "personalized score" | Pending |
-| 11 | Re-ranker | Diversity + cold-start polish | Pending |
-| 12 | A/B Testing Framework | Final layer — measure improvements | Pending |
+The system is intentionally designed with strong boundaries between components so each can be built and tested in isolation. Each component exposes a clear contract (HTTP API, Redis Stream topic, or DB schema) and can be mocked when working on other parts.
 
 ### Isolation Principles
 - **Each service is a standalone Python package** with its own `requirements.txt`
 - **Communication contracts are explicit:** Pydantic schemas for HTTP, JSON schemas for Redis Stream events
 - **Every component can run with mocked dependencies** (e.g., Recall can be tested with a fake MongoDB; Ranking can be tested with synthetic candidates)
-- **Shared models live in `/shared/schemas/`** so changes are coordinated
+- **Shared models live in `database/schemas/`** so changes are coordinated
 - **Each component has its own `README.md`** documenting its contract, env vars, and how to run it standalone
-
----
-
-## CURRENT STAGE: Database Layer (Component #1)
-
-This is what we are working on right now. Everything below is the scope for this single component.
-
-### Goals
-1. Set up **MongoDB Atlas M0** free cluster (cloud, free forever)
-2. Set up **Redis** locally via Docker (cache + Redis Streams message queue)
-3. Set up **MinIO** locally via Docker (S3-compatible object storage for video files)
-4. Define and create the **four core collections**: `users`, `videos`, `interactions`, `experiments`
-5. Define and create **all required indexes**, including the **Vector Search index** on `videos.content_embedding` (manual via Atlas UI — M0 limitation)
-6. Define **Pydantic schemas** for every collection that all other services will import
-7. Write a **seed script** that populates 50 fake users and 200 fake videos with random embeddings, so downstream components have data to work with from day one
-8. Write a **smoke-test script** that verifies: Mongo connection, Redis connection, MinIO connection, indexes exist, vector search returns results
-
-### Out of Scope (deferred to later components)
-- Real video files (Upload Service handles this)
-- Real embeddings from CLIP/Whisper (Content Analyzer handles this — for now seed with random vectors)
-- Authentication (Upload Service handles this later)
-- Stream processing (Stream Processors handle this later)
-
-### Deliverables for This Stage
-```
-mini-tiktok/
-├── docker-compose.yml             # spins up Redis + MinIO locally
-└── database/
-    ├── README.md                  # how to run this component standalone
-    ├── requirements.txt
-    ├── .env.example               # MONGO_URI, REDIS_URL, MINIO_*, etc.
-    ├── schemas/
-    │   ├── __init__.py
-    │   ├── user.py                # Pydantic User model
-    │   ├── video.py               # Pydantic Video model
-    │   ├── interaction.py         # Pydantic Interaction model
-    │   └── experiment.py
-    ├── scripts/
-    │   ├── create_indexes.py      # creates all standard MongoDB indexes
-    │   ├── vector_index_def.json  # JSON definition to paste into Atlas UI
-    │   ├── seed_data.py           # populates fake users + videos
-    │   └── smoke_test.py          # verifies everything works
-    └── client.py                  # shared MongoDB + Redis + MinIO client factory
-```
-
-### Definition of Done
-- [ ] MongoDB Atlas M0 cluster created, connection string in `.env`
-- [ ] Docker Compose runs Redis + MinIO locally with `docker compose up -d`
-- [ ] All four collections exist with documents
-- [ ] All standard indexes created and verified via `db.<collection>.getIndexes()`
-- [ ] Vector Search index `video_content_index` is **ACTIVE** in Atlas UI
-- [ ] `python scripts/seed_data.py` populates the DB with 50 users + 200 videos
-- [ ] `python scripts/smoke_test.py` passes all checks:
-  - [ ] MongoDB connection
-  - [ ] Redis connection (and stream creation works)
-  - [ ] MinIO connection (and bucket creation works)
-  - [ ] Vector search returns nearest videos for a sample user vector
-  - [ ] Standard indexes are present
-- [ ] `schemas/` package is importable from a sibling directory (so other components can use it)
-- [ ] `README.md` documents how a teammate could rebuild this from scratch, including the manual Atlas UI steps for the vector index
 
 ---
 
 ## Notes for Future Sessions
 
-- Each component will get its own folder under `mini-tiktok/` with a similar structure to `database/`
-- When starting a new component, update PART 2 status table and add a new "CURRENT STAGE" section at the bottom
+- Each component will get its own folder under the project root with a similar structure to `database/`
+- Build progress, current focus, and the per-stage "Definition of Done" checklists live in `TODO.md` — update there, not here
 - Keep PART 1 architecture stable — only update if a fundamental design decision changes (and document the swap in the "Stack Changes" subsection)
 - Always preserve the principle: **a component should be developable and testable without the others running**
 - If a tool's free tier ever changes, check this doc first; we explicitly chose tools to be free

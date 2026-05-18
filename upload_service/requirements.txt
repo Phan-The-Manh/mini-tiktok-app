@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+python-dotenv
+pymongo
+redis
+minio
+requests
