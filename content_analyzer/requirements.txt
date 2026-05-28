@@ -1,0 +1,23 @@
+# Content Analyzer (Component #3) — background worker that embeds videos.
+#
+# Infra clients (shared with the Database Layer via _path.py).
+python-dotenv
+pydantic
+pymongo
+redis
+minio
+
+# Numerics + image IO.
+numpy
+pillow
+
+# Multi-modal encoders.
+# torch is CPU-only by default; the laptop runs CPU inference and Colab is the
+# documented fallback for batching on a free T4.
+torch
+transformers
+sentence-transformers
+
+# Whisper-tiny for audio transcription. The `openai-whisper` package bundles
+# the tiny weights download path used by step 3.6.
+openai-whisper
