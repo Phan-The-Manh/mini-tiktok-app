@@ -22,7 +22,7 @@ import upload_service._path  # noqa: F401  configures sys.path + env first
 
 from fastapi import FastAPI
 
-from upload_service.routers import videos
+from upload_service.routers import ui, videos
 from upload_service.services import storage
 
 app = FastAPI(
@@ -32,6 +32,7 @@ app = FastAPI(
 )
 
 app.include_router(videos.router)
+app.include_router(ui.router)
 
 
 @app.on_event("startup")

@@ -90,8 +90,12 @@ class VideoUploadedConsumer:
     ):
         self.handler = handler
         self.cfg = config or ConsumerConfig.from_env()
-        self.r = redis_client or get_redis()
-        self.db = mongo_db or get_mongo()
+        # `is not None` rather than `or`: pymongo Database raises
+        # NotImplementedError on bool() to prevent the common
+        # `if db:` mistake, so `mongo_db or get_mongo()` would crash
+        # when an explicit db is passed in (which main.py does).
+        self.r = redis_client if redis_client is not None else get_redis()
+        self.db = mongo_db if mongo_db is not None else get_mongo()
         self._stopping = False
 
     # --- Lifecycle ---
