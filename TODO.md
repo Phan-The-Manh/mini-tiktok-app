@@ -24,69 +24,103 @@
 
 ---
 
-## CURRENT STAGE: User Embedding Service (Component #4)
+## CURRENT STAGE: Recall Service (Component #5)
 
-A small FastAPI microservice plus a shared embedding-math library. It maintains two vectors per user in the **same 384-d space as `videos.content_embedding`** (so Recall can vector-search a user's vector directly against videos):
+The first half of the recommendation funnel. Given a `user_id`, return ~500 candidate videos (each tagged with the recall source that surfaced it) for the Ranking Service to score. Recall optimizes for **high recall over precision** — cast a wide, cheap net now; precision comes later in Rank (#10) and Re-rank (#11).
 
-- `short_term_embedding` — current-session interests, updated in near real-time from interaction events via an exponential moving average (EMA).
-- `long_term_embedding` — durable interests, recomputed in batch (nightly / Colab) from a long window of positive interactions.
+It runs several **parallel recall strategies** with asyncio and merges their outputs:
 
-It also serves a single blended **query vector** for the Recall Service (Component #5) and handles cold-start (a user with no history). The schema fields already exist on the `User` doc (`long_term_embedding`, `short_term_embedding`, `short_term_updated_at`).
+- **Vector recall** — fetch the user's blended query vector from the User Embedding Service (#4) and run Atlas `$vectorSearch` against `videos.content_embedding` (384-d cosine, index `video_content_index`). The personalized core.
+- **Trending recall** — time-decayed popularity from `videos.stats`. Covers freshness and gives cold-start users something good.
+- **Category / affinity recall** — videos in the user's liked categories and from recently-engaged authors, read from the denormalized `User.recent_interactions` / `recently_seen_*` fields.
 
-> Sequencing note: the live `user.action` event stream is owned by the Event Service (Component #8), which is built later. Component #4 builds and tests its consumer against **synthetic events** so it stays developable in isolation; the wire-up to real events lands with #8/#9.
+Candidates are deduped, tagged with their recall source(s), filtered to `moderation_status == approved`, stripped of already-seen videos, capped at ~500, and cached in Redis per user.
+
+> Dependency note: Recall consumes the query vector via the User Embedding Service's documented HTTP contract (`GET /users/{id}/embedding`, port 8002). That call sits behind a small client interface so Recall stays developable in isolation against a mocked provider; the same interface surfaces the `cold_start` flag so Recall can branch.
 
 ### Goals (broken down into small, testable steps)
 
-1. **Project skeleton.** Standalone `user_embedding/` package with its own `requirements.txt`, `.env.example`, and `_path.py` that reuses `database/client.py` and `database/schemas/`.
-2. **Embedding math core (pure NumPy, no I/O).** Action weights (like / complete-watch / watch / skip / not_interested), EMA short-term update `s' = normalize(decay*s + (1-decay)*weight(action)*v)`, long-term aggregation (weighted mean of positively-interacted video vectors), and the query-vector blend `q = normalize(beta*long + (1-beta)*short)`. All L2-normalized, deterministic, unit-tested with synthetic vectors.
-3. **Mongo adapter.** Read a user's two embeddings; persist `short_term_embedding` + `short_term_updated_at` and `long_term_embedding` via partial `$set` updates. Read a video's `content_embedding` (needed to apply an interaction). Idempotent.
-4. **Redis vector cache.** Hot-path cache of a user's short-term (and blended query) vector so reads/updates don't hit Mongo every time. Floats serialized (JSON or base64) because the shared Redis client uses `decode_responses=True`. TTL + write-through to Mongo.
-5. **FastAPI service.** `GET /users/{user_id}/embedding` returns the blended query vector + metadata (dim, freshness, cold_start flag); `GET /health` checks Mongo + Redis. Optional dev-only `POST /users/{user_id}/interactions` to apply a synthetic interaction by hand.
-6. **`user.action` Redis Streams consumer.** Consumer group `user_embedding` on stream `user.action`, mirroring the Content Analyzer's reliability pattern: XREADGROUP + XACK on success, idempotency on `interaction_id`, retry + `user.action.dlq` after N failures. For each event: look up the video's `content_embedding`, apply the EMA update, write through cache + Mongo. Tested with synthetic events (no Event Service required).
-7. **Long-term recompute batch.** A Colab/Kaggle-runnable `notebooks/recompute_longterm.py` that recomputes `long_term_embedding` for all (or stale) users from their positive interactions over a window, reusing the same math core. Flags: `--limit`, `--window-days`, `--dry-run`.
-8. **Cold-start handling.** When a user has neither embedding, return a defined fallback (empty vector + `cold_start=true`) so Recall can branch to demographics/trending instead of vector search. Document the contract.
-9. **README.** Document the HTTP contract, the `user.action` event shape, env vars, how to run standalone with mocked deps, the chosen EMA decay + action weights + blend beta, the cache strategy, and the cold-start behavior.
-10. **Smoke test.** End-to-end: seed a user, publish a few synthetic `user.action` events referencing videos with known `content_embedding`s, run the consumer once, and assert the user's `short_term_embedding` moved toward those videos (cosine similarity increased), is unit-norm and 384-d, that cache and Mongo agree, and that `GET /users/{id}/embedding` returns a valid query vector. Cleanup in a `finally`.
+1. **Project skeleton.** Standalone `recall_service/` package with its own `requirements.txt`, `.env.example`, and `_path.py` reusing `database/client.py` and `database/schemas/`.
+2. **Query-vector client.** Fetch a user's blended query vector + `cold_start` flag from the User Embedding Service (#4) over HTTP. Behind a `QueryVectorProvider` interface with an HTTP impl and an in-process/mock impl, so strategy tests don't need #4 running. Timeout + fallback to cold-start on failure.
+3. **Vector recall strategy.** Atlas `$vectorSearch` over `videos.content_embedding` using the query vector; `numCandidates` / `limit` tunable; returns `(video_id, score)` with `moderation_status == approved` filtered in the pipeline. Skipped for cold-start users.
+4. **Trending recall strategy.** Mongo aggregation ranking by a time-decayed engagement score from `videos.stats` (views / likes / completion_rate) and `uploaded_at`. Pure DB, no user vector — the cold-start backbone.
+5. **Category / affinity recall strategy.** Pull the user's top liked categories and recently-engaged authors from the denormalized `User` doc; fetch recent approved videos matching them. Degrades to empty cleanly for a brand-new user.
+6. **Merge + dedup + exclusions.** Union candidates across strategies, dedup by `video_id` keeping all contributing `recall_source` tags and the max per-strategy score, drop already-seen videos (`recent_interactions.last_50_video_ids` plus an optional Redis seen-set), cap at `RECALL_LIMIT` (default 500).
+7. **Parallel orchestration (asyncio).** Run the enabled strategies concurrently with a per-strategy timeout; a slow or failing strategy is logged and skipped rather than failing the whole recall (graceful degradation). Deterministic merge order for stable tests.
+8. **Cold-start path.** When the query vector is `cold_start`, skip vector recall and lean on trending + category/demographics so a new user still gets a full candidate set. Document the contract.
+9. **Redis result cache.** Cache the per-user candidate list under a short TTL (`RECALL_CACHE_TTL`, default ~60s) so repeated feed pulls within a session don't re-query Atlas. The cache key carries a strategy/version tag so tuning invalidates cleanly.
+10. **Service + library API.** `GET /recall/{user_id}` returns the candidate list + per-candidate sources + which strategies ran; `GET /health` checks Mongo + Redis + the #4 dependency. Also expose an importable `recall(user_id) -> list[Candidate]` so the Feed API (#6) can call Recall in-process without HTTP.
+11. **README.** Document the contract (request/response, the `Candidate` shape), each strategy and its tunables, the recall cap, the cold-start behavior, the #4 dependency + how to mock it, and the cache strategy.
+12. **Smoke test.** End-to-end against seeded data: a warm user returns a non-empty candidate set whose top entries carry the `vector` source; a cold user returns a `trending`-dominated set; dedup holds (no repeated `video_id`); already-seen exclusions are respected; every candidate is `approved`. Cleanup in a `finally`.
 
 ### Out of Scope (deferred to later components)
-- Wiring to the real `user.action` stream (Event Service #8 / Stream Processors #9 own production fan-out)
-- Using the user vector for retrieval (that is Recall, Component #5)
-- A learned (trained) fusion of long/short term — fixed blend until interaction data exists
-- Per-user real-time long-term updates (long-term stays a batch job for now)
-- Negative-feedback modeling beyond a simple negative action weight
+- Scoring / ranking candidates beyond their raw recall score (Ranking, Component #10)
+- Diversity, freshness balancing, cold-start injection, business rules (Re-ranker, Component #11)
+- A real follow / social graph (use the denormalized `User` fields until an Event-driven graph exists)
+- Personalized or per-region trending (global trending for now)
+- Orchestrating the full feed (Feed API, Component #6 — it calls Recall)
 
 ### Deliverables for This Stage
 ```
-user_embedding/
+recall_service/
 ├── README.md
 ├── requirements.txt
 ├── .env.example
 ├── _path.py                  # adds database/ to sys.path, loads .env
 ├── main.py                   # FastAPI app entry point
 ├── routers/
-│   └── embeddings.py         # GET /users/{id}/embedding, GET /health, dev POST
+│   └── recall.py             # GET /recall/{user_id}, GET /health
+├── clients/
+│   └── query_vector.py       # QueryVectorProvider (HTTP impl + mock)
+├── strategies/
+│   ├── vector.py             # Atlas $vectorSearch recall
+│   ├── trending.py           # time-decayed popularity recall
+│   └── affinity.py           # category / author affinity recall
 ├── services/
-│   ├── math_core.py          # pure-NumPy EMA / aggregation / blend (no I/O)
-│   ├── store.py              # Mongo read/write adapter
-│   ├── cache.py              # Redis write-through vector cache
-│   └── update.py             # apply-interaction + read-query orchestration
-├── consumers/
-│   └── user_action.py        # Redis Streams XREADGROUP loop + ack/dlq
+│   ├── merge.py              # dedup + source tagging + exclusions + cap
+│   ├── orchestrator.py       # asyncio parallel run + graceful degradation
+│   └── cache.py              # Redis per-user candidate cache
 ├── schemas/
-│   └── events.py             # UserActionEvent
-├── notebooks/
-│   └── recompute_longterm.py # Colab-runnable long-term batch path
+│   └── candidate.py          # Candidate + RecallResponse models
 └── tests/
     └── smoke_test.py
 ```
 
 ### Definition of Done
 
-> Status: **all of steps 4.1-4.10 are implemented and verified against live
-> Redis + MongoDB Atlas (2026-06-19).** The math core is unit-tested with no
-> infra; the end-to-end smoke test and every infra-gated check below were run
-> and pass. Component complete.
+> Status: not started. Build the strategies behind the mock query-vector
+> provider first (no #4 process needed), then wire the HTTP client and run the
+> infra-gated checks once Docker + Atlas are up and the User Embedding Service
+> is running on :8002.
 
+- [ ] `uvicorn recall_service.main:app --port 8003` starts the service
+- [ ] `GET /health` returns `ok` for mongo + redis and reports the #4 dependency reachability
+- [ ] `GET /recall/{user_id}` returns up to ~500 deduped candidates, each tagged with its recall source(s)
+- [ ] A warm user's candidates include vector-recall hits near the top; a cold-start user gets a trending-backed set with no vector recall
+- [ ] Already-seen videos are excluded and every returned candidate is `moderation_status == approved`
+- [ ] A failing / slow individual strategy degrades gracefully (logged, skipped) without failing the whole recall
+- [ ] The candidate list is cached in Redis under a short TTL and a strategy-version tag
+- [ ] Strategies are unit-testable behind a mocked `QueryVectorProvider` (no #4 process required)
+- [ ] `python -m recall_service.tests.smoke_test` passes end-to-end against seeded data
+- [ ] No duplication of MongoDB/Redis connection code — uses `database/client.py`
+- [ ] README documents the contract, the strategies + tunables, cold-start behavior, the #4 dependency + mocking, and the cache strategy
+
+---
+
+## COMPLETED STAGES
+
+### Component #4: User Embedding Service `[DONE]`
+
+FastAPI microservice plus a shared pure-NumPy embedding-math library that maintains two 384-d vectors per user in the same cosine space as `videos.content_embedding`, and serves a single blended query vector to Recall (#5) with cold-start handling. Full contract, the EMA / blend parameters, and the cache strategy: `user_embedding/README.md`.
+
+Key design points:
+- **Math core (no I/O):** signed action weights (like / share +1.0, follow +0.9, comment +0.7, skip -0.5, not_interested / report -1.0, graded watch `-0.3 + 1.3*watch_pct`), short-term EMA `s' = normalize(decay*s + (1-decay)*weight*v)` (decay 0.9), long-term weighted-mean aggregation, and the query blend `q = normalize(beta*long + (1-beta)*short)` (beta 0.5). Everything L2-normalized; the zero vector is the cold-start sentinel. Unit-tested with no infra (`tests/_smoke_math.py`, 7 checks).
+- **Two update paths:** short-term drifts live per interaction (the `user.action` consumer, write-through to Mongo + Redis); long-term is rebuilt in batch (`notebooks/recompute_longterm.py`) from a window of positive interactions. Both reuse the same math core.
+- **Reliability:** consumer group `user_embedding` on stream `user.action`; idempotency on `interaction_id` (marked only after a successful apply, because EMA is not naturally idempotent); XAUTOCLAIM reclaim of stale pending messages; `user.action.dlq` after `USER_EMBEDDING_MAX_RETRIES` (default 3). Permanent errors (unknown user / deleted video) DLQ immediately; `VideoNotEmbedded` is retried (the Content Analyzer may catch up).
+- **Read path:** `GET /users/{id}/embedding` returns the blended query vector + metadata (`dim`, `cold_start`, `has_long_term`, `has_short_term`); cold-start returns an empty vector so Recall can branch to trending / demographics. Dev-only `POST /users/{id}/interactions` shares the same apply path as the consumer.
+- **Sequencing:** the live `user.action` stream is owned by the Event Service (#8), built later; #4 is exercised with synthetic events until then.
+
+Definition of Done (all met, verified against live Redis + MongoDB Atlas 2026-06-19):
 - [x] `uvicorn user_embedding.main:app --port 8002` starts the service
 - [x] `GET /health` returns `ok` for mongo + redis
 - [x] `GET /users/{id}/embedding` returns a unit-norm 384-d query vector for a user with history (`seed_u_000`: dim 384, norm 1.0), and `cold_start=true` with an empty vector for a user with none
@@ -99,10 +133,6 @@ user_embedding/
 - [x] `python -m user_embedding.tests.smoke_test` passes end-to-end
 - [x] No duplication of MongoDB/Redis connection code — uses `database/client.py`
 - [x] README documents the HTTP + event contract, the EMA decay / action weights / blend beta, the cache strategy, and cold-start behavior
-
----
-
-## COMPLETED STAGES
 
 ### Component #3: Content Analyzer `[DONE]`
 
