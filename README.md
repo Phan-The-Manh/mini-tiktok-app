@@ -34,9 +34,9 @@ A laptop-friendly, end-to-end video recommendation system inspired by TikTok's F
 |---|---|---|
 | 1 | Database Layer | `[DONE]` |
 | 2 | Upload Service | `[DONE]` |
-| 3 | Content Analyzer | **Current focus** |
-| 4 | User Embedding Service | Pending |
-| 5 | Recall Service | Pending |
+| 3 | Content Analyzer | `[DONE]` |
+| 4 | User Embedding Service | `[DONE]` |
+| 5 | Recall Service | **Current focus** |
 | 6 | Feed API | Pending |
 | 7 | Frontend | Pending |
 | 8 | Event Service | Pending |

@@ -1,0 +1,14 @@
+# User Embedding Service (Component #4) — FastAPI microservice + embedding math.
+#
+# Infra clients (shared with the Database Layer via _path.py).
+python-dotenv
+pydantic
+pymongo
+redis
+
+# Numerics. The math core (EMA / aggregation / blend) is pure NumPy.
+numpy
+
+# HTTP service.
+fastapi
+uvicorn[standard]
